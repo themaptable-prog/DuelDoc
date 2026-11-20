@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
-  <title>Mobile Dual-Doc Text Editor</title>
+  <title>Dual Doc</title>
   <style>
     :root {
       --bg-color: #121212;
@@ -328,6 +328,35 @@
     #fileInput {
       display: none;
     }
+
+    .replace-dialog {
+      position: fixed;
+      inset: 0;
+      margin: auto;
+      width: min(28rem, calc(100% - 2rem));
+      padding: 1rem;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--surface-color);
+      color: var(--text-color);
+    }
+
+    .replace-dialog::backdrop {
+      background: rgb(0 0 0 / 65%);
+    }
+
+    .replace-dialog h2 {
+      font-size: 1.1rem;
+    }
+
+    .replace-dialog p {
+      margin: 0.65rem 0 1rem;
+      overflow-wrap: anywhere;
+    }
+
+    .replace-dialog .button-group {
+      justify-content: flex-end;
+    }
   </style>
 </head>
 <body>
@@ -426,6 +455,18 @@
   <!-- Hidden Native File Input -->
   <input type="file" id="fileInput" accept=".txt,.md,.js,.html,.css,.json,.csv,text/*" />
 
+  <dialog class="replace-dialog" id="replaceDialog" aria-labelledby="replaceTitle" aria-describedby="replaceMessage">
+    <form method="dialog">
+      <h2 id="replaceTitle">Unsaved changes</h2>
+      <p id="replaceMessage"></p>
+      <div class="button-group">
+        <button class="btn" value="cancel" autofocus>Cancel</button>
+        <button class="btn" id="replaceDiscard" value="discard">Discard changes</button>
+        <button class="btn active" id="replaceSave" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
     (function () {
       // DOM References
@@ -436,6 +477,11 @@
       const btnToggleMenus = document.getElementById('btnToggleMenus');
       const activeDocTitle = document.getElementById('activeDocTitle');
       const fileInput = document.getElementById('fileInput');
+      const replaceDialog = document.getElementById('replaceDialog');
+      const replaceTitle = document.getElementById('replaceTitle');
+      const replaceMessage = document.getElementById('replaceMessage');
+      const replaceDiscard = document.getElementById('replaceDiscard');
+      const replaceSave = document.getElementById('replaceSave');
 
       // Top Menu Buttons
       const btnNew = document.getElementById('btnNew');
@@ -473,6 +519,7 @@
 
       // State Variables
       let activeDocId = 1;
+      let firstDocId = 1;
       let isSplit = false;
       let splitMode = 'side'; // 'side' or 'stack'
       let syncScroll = false;
@@ -483,20 +530,18 @@
       let isCtrlActive = false;
       let shiftAnchorRange = null;
 
-      // Filenames per pane
-      const fileNames = { 1: 'new 1.txt', 2: 'new 2.txt' };
-      // File handles are session-only; names and contents still persist locally.
-      const fileHandles = { 1: null, 2: null };
+      const editors = { 1: editor1, 2: editor2 };
+      const panes = { 1: pane1, 2: pane2 };
+      const paneTitles = { 1: paneTitle1, 2: paneTitle2 };
+      const documents = { 1: null, 2: null };
       let nextNewNumber = 3;
       let pendingOpenId = null;
+      let useStandardFileChooser = typeof window.showOpenFilePicker !== 'function';
       let fileBusy = false;
       const STORAGE_NEXT_NAME = 'mobile_editor_next_name';
-
-      // LocalStorage Keys
-      const STORAGE_DOC1 = 'mobile_editor_doc1';
-      const STORAGE_DOC2 = 'mobile_editor_doc2';
-      const STORAGE_FN1 = 'mobile_editor_fn1';
-      const STORAGE_FN2 = 'mobile_editor_fn2';
+      const STORAGE_VIEW = 'dual_doc_view';
+      const lineBlocks = new Set(['ADDRESS', 'BLOCKQUOTE', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+        'LI', 'OL', 'P', 'PRE', 'UL']);
 
       /* 1. Visual Viewport API for dynamic keyboard/screen resizes */
       function updateVisualViewport() {
@@ -525,43 +570,171 @@
       window.addEventListener('resize', updateBarDimensions);
 
       /* 2. Application Init & Persistence */
+      function readStorage(key) {
+        try {
+          return localStorage.getItem(key);
+        } catch {
+          return null;
+        }
+      }
+
+      function readRecord(key) {
+        try {
+          return JSON.parse(readStorage(key));
+        } catch {
+          return null;
+        }
+      }
+
+      function writeStorage(key, value) {
+        try {
+          localStorage.setItem(key, value);
+        } catch {
+          // Editing and file export can continue when browser storage is unavailable.
+        }
+      }
+
+      function draftKey(id) {
+        return 'dual_doc_draft_' + id;
+      }
+
+      function normalizeLineBreaks(text) {
+        return text.replace(/\r\n?/g, '\n');
+      }
+
+      function replaceEditorText(id, text) {
+        const editor = editors[id];
+        editor.textContent = text;
+        if (text.endsWith('\n')) editor.append(document.createElement('br'));
+      }
+
+      function readEditorText(editor) {
+        // The browser uses block elements for Enter and BRs for line breaks.
+        // A final BR in an editing block is the caret placeholder for its last line.
+        function readChildren(parent, endsLine) {
+          const children = Array.from(parent.childNodes).filter(node =>
+            node.nodeType === Node.ELEMENT_NODE || (node.nodeType === Node.TEXT_NODE && node.data.length));
+          const chunks = [];
+          let inline = '';
+          let hasInline = false;
+          children.forEach((node, index) => {
+            if (node.nodeType === Node.TEXT_NODE) {
+              inline += node.data;
+              hasInline = true;
+            } else if (lineBlocks.has(node.tagName)) {
+              if (hasInline) chunks.push(inline);
+              chunks.push(readChildren(node, true));
+              inline = '';
+              hasInline = false;
+            } else {
+              const terminal = endsLine && index === children.length - 1;
+              const text = node.tagName === 'BR' ? (terminal ? '' : '\n') : readChildren(node, terminal);
+              inline += text;
+              hasInline ||= text.length > 0;
+            }
+          });
+          if (hasInline) chunks.push(inline);
+          return chunks.join('\n');
+        }
+
+        return normalizeLineBreaks(readChildren(editor, true));
+      }
+
+      function restoreDocument(id, initialText) {
+        const draft = readRecord(draftKey(id));
+        const legacyName = readStorage('mobile_editor_fn' + id);
+        const legacyText = readStorage('mobile_editor_doc' + id);
+        const name = draft?.name || legacyName || `new ${id}.txt`;
+        const text = normalizeLineBreaks(draft?.text ?? legacyText ?? initialText);
+        const lineEnding = draft?.lineEnding ?? legacyText?.match(/\r\n|\r|\n/)?.[0];
+        documents[id] = {
+          name,
+          text,
+          savedName: name,
+          savedText: (draft ? draft.dirty : legacyText !== null) ? null : text,
+          copyOnly: draft?.copyOnly ?? !/\.txt$/i.test(name),
+          lineEnding: lineEnding === '\r\n' || lineEnding === '\r' ? lineEnding : '\n',
+          handle: null,
+        };
+        const match = /^new (\d+)\.txt$/i.exec(name);
+        if (match) nextNewNumber = Math.max(nextNewNumber, Number(match[1]) + 1);
+        paneTitles[id].textContent = name;
+        replaceEditorText(id, text);
+      }
+
+      function persistDocument(id) {
+        const doc = documents[id];
+        const { name, text, copyOnly, lineEnding } = doc;
+        writeStorage(draftKey(id), JSON.stringify({ name, text, dirty: isDirty(doc), copyOnly, lineEnding }));
+      }
+
+      function updateDocumentText(id) {
+        const doc = documents[id];
+        const text = readEditorText(editors[id]);
+        if (doc.text !== text) {
+          doc.text = text;
+          persistDocument(id);
+        }
+      }
+
+      function restoreView() {
+        const view = readRecord(STORAGE_VIEW);
+        if (!view) return;
+        firstDocId = view.firstDocId === 2 ? 2 : 1;
+        isSplit = view.isSplit === true;
+        activeDocId = isSplit && (view.activeDocId === 1 || view.activeDocId === 2) ? view.activeDocId : firstDocId;
+        splitMode = view.splitMode === 'stack' ? 'stack' : 'side';
+        syncScroll = view.syncScroll === true;
+        isDarkTheme = view.isDarkTheme !== false;
+        isTextWrapped = view.isTextWrapped !== false;
+        fontSize = Number.isFinite(view.fontSize) ? Math.max(10, Math.min(36, view.fontSize)) : 16;
+      }
+
+      function persistView() {
+        writeStorage(STORAGE_VIEW, JSON.stringify({
+          activeDocId, firstDocId, isSplit, splitMode, syncScroll, fontSize, isDarkTheme, isTextWrapped,
+        }));
+      }
+
+      function getActiveEditor() {
+        return editors[activeDocId];
+      }
+
       function initApp() {
+        nextNewNumber = Math.max(3, Number(readStorage(STORAGE_NEXT_NAME)) || 3);
+        restoreDocument(1, 'Welcome to Document 1.\n\nUse the top bar for file management & split options, and the bottom toolbar for formatting, zoom, and cursor navigation.');
+        restoreDocument(2, 'Welcome to Document 2.\n\nThis is your secondary document buffer for side-by-side editing.');
+        restoreView();
+        renderView();
+        setActivePane(activeDocId);
         updateVisualViewport();
 
-        // Restore filenames & contents
-        fileNames[1] = localStorage.getItem(STORAGE_FN1) || 'new 1.txt';
-        fileNames[2] = localStorage.getItem(STORAGE_FN2) || 'new 2.txt';
-        nextNewNumber = Math.max(3, Number(localStorage.getItem(STORAGE_NEXT_NAME)) || 3);
-        for (const name of Object.values(fileNames)) {
-          const match = /^new (\d+)\.txt$/i.exec(name);
-          if (match) nextNewNumber = Math.max(nextNewNumber, Number(match[1]) + 1);
+        for (const id of [1, 2]) {
+          editors[id].addEventListener('input', () => updateDocumentText(id));
+          editors[id].addEventListener('paste', event => {
+            if (!event.clipboardData) return;
+            event.preventDefault();
+            const text = event.clipboardData.getData('text/plain');
+            if (text) {
+              document.execCommand('insertText', false, normalizeLineBreaks(text));
+              updateDocumentText(id);
+            }
+          });
         }
-        paneTitle1.textContent = fileNames[1];
-        paneTitle2.textContent = fileNames[2];
 
-        const doc1Content = localStorage.getItem(STORAGE_DOC1);
-        const doc2Content = localStorage.getItem(STORAGE_DOC2);
-
-        editor1.textContent = doc1Content !== null ? doc1Content : 'Welcome to Document 1.\n\nUse the top bar for file management & split options, and the bottom toolbar for formatting, zoom, and cursor navigation.';
-        editor2.textContent = doc2Content !== null ? doc2Content : 'Welcome to Document 2.\n\nThis is your secondary document buffer for side-by-side editing.';
-
-        setActivePane(1);
-
-        // Auto-save listeners
-        editor1.addEventListener('input', saveStorage);
-        editor2.addEventListener('input', saveStorage);
         activeDocTitle.addEventListener('input', () => {
           const name = activeDocTitle.value.trim();
-          if (name && name !== fileNames[activeDocId]) {
-            fileHandles[activeDocId] = null;
+          const doc = documents[activeDocId];
+          if (name && name !== doc.name) {
+            doc.handle = null;
             setDocumentName(activeDocId, name, false);
-            saveStorage();
+            persistDocument(activeDocId);
           }
         });
         activeDocTitle.addEventListener('blur', () => {
-          activeDocTitle.value = fileNames[activeDocId];
+          activeDocTitle.value = documents[activeDocId].name;
         });
-        activeDocTitle.addEventListener('keydown', (event) => {
+        activeDocTitle.addEventListener('keydown', event => {
           if (event.key === 'Enter') {
             event.preventDefault();
             activeDocTitle.blur();
@@ -569,91 +742,68 @@
         });
       }
 
-      function saveStorage() {
-        localStorage.setItem(STORAGE_DOC1, editor1.textContent);
-        localStorage.setItem(STORAGE_DOC2, editor2.textContent);
-        localStorage.setItem(STORAGE_FN1, fileNames[1]);
-        localStorage.setItem(STORAGE_FN2, fileNames[2]);
-        localStorage.setItem(STORAGE_NEXT_NAME, String(nextNewNumber));
-      }
-
-      function getActiveEditor() {
-        return activeDocId === 1 ? editor1 : editor2;
-      }
-
-      /* 3. Active Pane Selection */
+      /* 3. Active Pane Selection & View Preferences */
       function setActivePane(id) {
+        const changed = activeDocId !== id;
+        if (changed) resetShift();
         activeDocId = id;
-        if (id === 1) {
-          pane1.classList.add('active-pane');
-          pane2.classList.remove('active-pane');
-          paneBadge1.textContent = 'Active';
-          paneBadge2.textContent = 'Inactive';
-        } else {
-          pane2.classList.add('active-pane');
-          pane1.classList.remove('active-pane');
-          paneBadge2.textContent = 'Active';
-          paneBadge1.textContent = 'Inactive';
-        }
-        activeDocTitle.value = fileNames[id];
+        const firstActive = id === 1;
+        pane1.classList.toggle('active-pane', firstActive);
+        pane2.classList.toggle('active-pane', !firstActive);
+        paneBadge1.textContent = firstActive ? 'Active' : 'Inactive';
+        paneBadge2.textContent = firstActive ? 'Inactive' : 'Active';
+        activeDocTitle.value = documents[id].name;
+        updateSaveButton();
+        if (changed) persistView();
       }
 
-      pane1.addEventListener('pointerdown', () => setActivePane(1));
-      pane2.addEventListener('pointerdown', () => setActivePane(2));
-      editor1.addEventListener('focus', () => setActivePane(1));
-      editor2.addEventListener('focus', () => setActivePane(2));
+      function renderView() {
+        for (const id of [1, 2]) {
+          // Give the active document the first position without rewriting either editor.
+          panes[id].style.order = firstDocId === id ? '0' : '1';
+          panes[id].classList.toggle('hidden', !isSplit && firstDocId !== id);
+          editors[id].classList.toggle('no-wrap', !isTextWrapped);
+        }
+        workspace.style.flexDirection = splitMode === 'side' ? 'row' : 'column';
+        btnSplit.classList.toggle('active', isSplit);
+        btnLayout.classList.toggle('hidden', !isSplit);
+        btnLayout.classList.toggle('active', splitMode === 'stack');
+        btnSyncScroll.classList.toggle('hidden', !isSplit);
+        btnSyncScroll.classList.toggle('active', syncScroll);
+        btnWrap.classList.toggle('active', isTextWrapped);
+        document.body.classList.toggle('light-theme', !isDarkTheme);
+        btnTheme.textContent = isDarkTheme ? '🌙' : '☀️';
+        document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+        updateBarDimensions();
+      }
 
-      /* 4. Top Menu Functions & File Operations */
+      for (const id of [1, 2]) {
+        panes[id].addEventListener('pointerdown', () => setActivePane(id));
+        editors[id].addEventListener('focus', () => setActivePane(id));
+      }
+
       btnToggleMenus.addEventListener('click', () => {
         document.body.classList.toggle('top-hidden');
         document.body.classList.toggle('bottom-hidden');
       });
 
-      // Split View Controls
       btnSplit.addEventListener('click', () => {
         isSplit = !isSplit;
-        if (isSplit) {
-          pane2.classList.remove('hidden');
-          btnSplit.classList.add('active');
-          btnLayout.classList.remove('hidden');
-          btnSyncScroll.classList.remove('hidden');
-          workspace.style.flexDirection = (splitMode === 'side') ? 'row' : 'column';
-        } else {
-          // If Pane 2 was active when closing split, swap Pane 2 into Pane 1 so the active doc remains visible
-          if (activeDocId === 2) {
-            const tempContent = editor1.textContent;
-            const tempFn = fileNames[1];
-            [fileHandles[1], fileHandles[2]] = [fileHandles[2], fileHandles[1]];
-
-            editor1.textContent = editor2.textContent;
-            fileNames[1] = fileNames[2];
-            paneTitle1.textContent = fileNames[1];
-
-            editor2.textContent = tempContent;
-            fileNames[2] = tempFn;
-            paneTitle2.textContent = fileNames[2];
-
-            saveStorage();
-          }
-
-          pane2.classList.add('hidden');
-          btnSplit.classList.remove('active');
-          btnLayout.classList.add('hidden');
-          btnSyncScroll.classList.add('hidden');
-          setActivePane(1);
-        }
-        updateBarDimensions();
+        if (!isSplit) firstDocId = activeDocId;
+        renderView();
+        persistView();
       });
 
       btnLayout.addEventListener('click', () => {
-        splitMode = (splitMode === 'side') ? 'stack' : 'side';
-        btnLayout.classList.toggle('active', splitMode === 'stack');
-        workspace.style.flexDirection = (splitMode === 'side') ? 'row' : 'column';
+        splitMode = splitMode === 'side' ? 'stack' : 'side';
+        renderView();
+        persistView();
       });
 
       btnSyncScroll.addEventListener('click', () => {
         syncScroll = !syncScroll;
-        btnSyncScroll.classList.toggle('active', syncScroll);
+        renderView();
+        persistView();
       });
 
       // Synced Scroll Handlers
@@ -677,93 +827,169 @@
       // Theme & Wrap Toggles
       btnTheme.addEventListener('click', () => {
         isDarkTheme = !isDarkTheme;
-        if (isDarkTheme) {
-          document.body.classList.remove('light-theme');
-          btnTheme.textContent = '🌙';
-        } else {
-          document.body.classList.add('light-theme');
-          btnTheme.textContent = '☀️';
-        }
+        renderView();
+        persistView();
       });
 
       btnWrap.addEventListener('click', () => {
         isTextWrapped = !isTextWrapped;
-        editor1.classList.toggle('no-wrap', !isTextWrapped);
-        editor2.classList.toggle('no-wrap', !isTextWrapped);
-        btnWrap.classList.toggle('active', isTextWrapped);
+        renderView();
+        persistView();
       });
 
-      // File New, Open, Save
+      /* 4. File New, Open, Save */
       function setDocumentName(id, name, updateInput = true) {
-        fileNames[id] = name;
-        (id === 1 ? paneTitle1 : paneTitle2).textContent = name;
+        documents[id].name = name;
+        paneTitles[id].textContent = name;
         if (updateInput && activeDocId === id) activeDocTitle.value = name;
+      }
+
+      function updateSaveButton() {
+        const copyOnly = documents[activeDocId].copyOnly;
+        btnSave.textContent = copyOnly ? 'Save Copy' : 'Save';
+        btnSave.title = copyOnly ? 'Download a new plain-text copy' : 'Save File';
+        updateBarDimensions();
       }
 
       function setFileBusy(busy) {
         fileBusy = busy;
-        // Prevent document replacement/swapping while a picker or disk write is pending.
         [btnNew, btnOpen, btnSave, btnSplit, activeDocTitle].forEach(el => el.disabled = busy);
       }
 
-      btnNew.addEventListener('click', () => {
-        if (fileBusy) return;
-        const activeEd = getActiveEditor();
-        if (activeEd.textContent.trim().length > 0) {
-          if (!confirm(`Clear document ${activeDocId} (${fileNames[activeDocId]})?`)) return;
+      function isDirty(doc) {
+        return doc.text !== doc.savedText || doc.name !== doc.savedName;
+      }
+
+      function askBeforeReplacing(title, message, discardLabel, saveLabel = '') {
+        replaceTitle.textContent = title;
+        replaceMessage.textContent = message;
+        replaceDiscard.textContent = discardLabel;
+        replaceSave.textContent = saveLabel;
+        replaceSave.classList.toggle('hidden', !saveLabel);
+        replaceDialog.returnValue = 'cancel';
+        return new Promise(resolve => {
+          replaceDialog.addEventListener('close', () => resolve(replaceDialog.returnValue), { once: true });
+          replaceDialog.showModal();
+        });
+      }
+
+      async function canReplaceDocument(id, action) {
+        updateDocumentText(id);
+        const doc = documents[id];
+        if (!isDirty(doc)) {
+          return action !== 'New' || !doc.text ||
+            await askBeforeReplacing('New document', `Replace “${doc.name}” with an empty document?`, 'Replace') === 'discard';
         }
-        let name;
-        do { name = `new ${nextNewNumber++}.txt`; }
-        while (Object.values(fileNames).includes(name));
-        fileHandles[activeDocId] = null;
-        setDocumentName(activeDocId, name);
-        activeEd.textContent = '';
-        saveStorage();
-        activeEd.focus();
+
+        const choice = await askBeforeReplacing('Unsaved changes',
+          `Save your changes to “${doc.name}” before replacing this document?`,
+          'Discard changes', doc.copyOnly ? 'Save Copy' : 'Save');
+        if (choice !== 'save') return choice === 'discard';
+
+        const textBeforeSave = doc.text;
+        const result = await saveDocument(id);
+        if (result === 'saved') return !isDirty(doc);
+        if (result !== 'download' || doc.text !== textBeforeSave) return false;
+        return await askBeforeReplacing('Check your download',
+          `Once you’ve saved the download for “${doc.name}”, you can replace this draft.`, 'Replace') === 'discard';
+      }
+
+      function useDocument(id, name, text, lineEnding = '\n', handle = null, copyOnly = false) {
+        documents[id] = { name, text, savedName: name, savedText: text, copyOnly, lineEnding, handle };
+        replaceEditorText(id, text);
+        setDocumentName(id, name);
+        persistDocument(id);
+        if (activeDocId === id) {
+          resetShift();
+          updateSaveButton();
+          editors[id].focus();
+        }
+      }
+
+      btnNew.addEventListener('click', async () => {
+        if (fileBusy) return;
+        const id = activeDocId;
+        setFileBusy(true);
+        try {
+          if (!await canReplaceDocument(id, 'New')) return;
+          let name;
+          do {
+            name = `new ${nextNewNumber++}.txt`;
+          } while (Object.values(documents).some(doc => doc.name === name));
+          useDocument(id, name, '');
+          writeStorage(STORAGE_NEXT_NAME, String(nextNewNumber));
+        } finally {
+          setFileBusy(false);
+        }
       });
 
+      async function readOpenedText(file) {
+        if (/\.(docx?|odt|pdf|pages|xlsx?|pptx?)$/i.test(file.name)) throw new Error('Unsupported document type');
+        const source = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+        if (source.includes('\0') || source.startsWith('%PDF-')) throw new Error('Binary document');
+        return source;
+      }
+
       async function loadDocument(id, file, handle = null) {
-        const content = await file.text();
-        const editor = id === 1 ? editor1 : editor2;
-        editor.textContent = content;
-        fileHandles[id] = handle;
-        setDocumentName(id, file.name);
-        saveStorage();
-        if (activeDocId === id) editor.focus();
+        let source;
+        try {
+          source = await readOpenedText(file);
+          updateDocumentText(id);
+          const hadUnsavedChanges = isDirty(documents[id]);
+          if (!await canReplaceDocument(id, 'Open')) return;
+          if (handle && hadUnsavedChanges && !isDirty(documents[id])) {
+            // Save may have just updated the file selected in the open picker.
+            file = await handle.getFile();
+            source = await readOpenedText(file);
+          }
+        } catch {
+          alert('Dual Doc could not read this file as UTF-8 text. Export it as plain text, then open that copy.');
+          return;
+        }
+
+        const lineEnding = source.match(/\r\n|\r|\n/)?.[0] || '\n';
+        const isPlainText = /\.txt$/i.test(file.name) &&
+          (!file.type || file.type === 'text/plain' || file.type === 'application/octet-stream') &&
+          !/^\s*\{\\rtf\d/i.test(source);
+        useDocument(id, file.name, normalizeLineBreaks(source), lineEnding, isPlainText ? handle : null, !isPlainText);
       }
 
       btnOpen.addEventListener('click', async () => {
         if (fileBusy) return;
         const id = activeDocId;
-        if (typeof window.showOpenFilePicker === 'function') {
-          setFileBusy(true);
+        setFileBusy(true);
+        if (!useStandardFileChooser) {
           try {
             const [handle] = await window.showOpenFilePicker();
             await loadDocument(id, await handle.getFile(), handle);
             return;
           } catch (error) {
             if (error.name === 'AbortError') return;
-            alert('The file could not be opened. Please try the standard file chooser.');
+            useStandardFileChooser = true;
+            if (navigator.userActivation?.isActive === false) {
+              alert('Press Open again to use the standard file chooser.');
+              return;
+            }
           } finally {
             setFileBusy(false);
           }
         }
+        setFileBusy(true);
         pendingOpenId = id;
         fileInput.click();
       });
 
-      fileInput.addEventListener('cancel', () => { pendingOpenId = null; });
-      fileInput.addEventListener('change', async (event) => {
+      fileInput.addEventListener('cancel', () => {
+        pendingOpenId = null;
+        setFileBusy(false);
+      });
+      fileInput.addEventListener('change', async event => {
         const file = event.target.files[0];
         const id = pendingOpenId;
         pendingOpenId = null;
         fileInput.value = '';
-        if (!file || id === null) return;
-        setFileBusy(true);
         try {
-          await loadDocument(id, file);
-        } catch (error) {
-          alert('The file could not be read. Your document has not been replaced.');
+          if (file && id !== null) await loadDocument(id, file);
         } finally {
           setFileBusy(false);
         }
@@ -781,37 +1007,52 @@
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
 
-      btnSave.addEventListener('click', async () => {
-        if (fileBusy) return;
-        const id = activeDocId;
-        const name = fileNames[id];
-        const content = getActiveEditor().textContent;
-        setFileBusy(true);
+      async function saveDocument(id) {
+        updateDocumentText(id);
+        const doc = documents[id];
+        const { name, text, lineEnding } = doc;
+        const fileText = text.replace(/\n/g, lineEnding);
+        if (doc.copyOnly) {
+          const stem = name.replace(/\.[^.]+$/, '') || 'document';
+          downloadDocument(fileText, stem + '-copy.txt');
+          return 'download';
+        }
+
         try {
-          let handle = fileHandles[id];
+          let handle = doc.handle;
           if (!handle && typeof window.showSaveFilePicker === 'function') {
             handle = await window.showSaveFilePicker({ suggestedName: name });
           }
           if (handle) {
             const writable = await handle.createWritable();
             try {
-              await writable.write(content);
+              await writable.write(fileText);
               await writable.close();
             } catch (error) {
-              try { await writable.abort(); } catch (_) { /* Already closed. */ }
+              try { await writable.abort(); } catch { /* The stream may already be closed. */ }
               throw error;
             }
-            fileHandles[id] = handle;
+            doc.handle = handle;
+            doc.savedText = text;
+            doc.savedName = handle.name;
             setDocumentName(id, handle.name);
-            saveStorage();
-          } else {
-            downloadDocument(content, name);
+            persistDocument(id);
+            return 'saved';
           }
         } catch (error) {
-          if (error.name !== 'AbortError') {
-            alert('Could not save directly to the file. A download will be offered instead.');
-            downloadDocument(content, name);
-          }
+          if (error.name === 'AbortError') return 'cancelled';
+          alert('Could not save directly to the file. A download will be offered instead.');
+        }
+
+        downloadDocument(fileText, name);
+        return 'download';
+      }
+
+      btnSave.addEventListener('click', async () => {
+        if (fileBusy) return;
+        setFileBusy(true);
+        try {
+          await saveDocument(activeDocId);
         } finally {
           setFileBusy(false);
         }
@@ -824,21 +1065,43 @@
           const ed = getActiveEditor();
           ed.focus();
           document.execCommand(cmd, false, null);
-          saveStorage();
+          updateDocumentText(activeDocId);
         });
       });
 
       btnZoomIn.addEventListener('click', () => {
         fontSize = Math.min(fontSize + 2, 36);
-        document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+        renderView();
+        persistView();
       });
 
       btnZoomOut.addEventListener('click', () => {
         fontSize = Math.max(fontSize - 2, 10);
-        document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+        renderView();
+        persistView();
       });
 
       /* 6. Shift/Ctrl Modifiers & Cursor Navigation */
+      function resetShift() {
+        shiftState = 0;
+        shiftAnchorRange = null;
+        btnShift.classList.remove('modifier-single', 'modifier-locked');
+        btnShift.textContent = 'Shift';
+      }
+
+      function rangeInEditor(range, editor) {
+        return range && editor.contains(range.startContainer) && editor.contains(range.endContainer);
+      }
+
+      function editorSelection(editor) {
+        const selection = window.getSelection();
+        return selection?.rangeCount && rangeInEditor(selection.getRangeAt(0), editor) ? selection : null;
+      }
+
+      bottomBar.addEventListener('mousedown', event => {
+        if (event.target.closest('button') && editorSelection(getActiveEditor())) event.preventDefault();
+      });
+
       btnShift.addEventListener('click', () => {
         shiftState = (shiftState + 1) % 3;
         btnShift.classList.remove('modifier-single', 'modifier-locked');
@@ -846,14 +1109,13 @@
         if (shiftState === 1) {
           btnShift.classList.add('modifier-single');
           btnShift.textContent = 'Shift (1)';
-          const sel = window.getSelection();
-          if (sel.rangeCount > 0) shiftAnchorRange = sel.getRangeAt(0).cloneRange();
+          const sel = editorSelection(getActiveEditor());
+          shiftAnchorRange = sel?.getRangeAt(0).cloneRange() || null;
         } else if (shiftState === 2) {
           btnShift.classList.add('modifier-locked');
           btnShift.textContent = 'Shift (2)';
         } else {
-          btnShift.textContent = 'Shift';
-          shiftAnchorRange = null;
+          resetShift();
         }
       });
 
@@ -865,9 +1127,9 @@
       // Shift single-tap range expansion on touch/click inside editor
       [editor1, editor2].forEach(ed => {
         ed.addEventListener('click', () => {
-          if (shiftState === 1 && shiftAnchorRange) {
-            const sel = window.getSelection();
-            if (sel.rangeCount > 0) {
+          if (shiftState === 1 && ed === getActiveEditor()) {
+            const sel = editorSelection(ed);
+            if (sel && rangeInEditor(shiftAnchorRange, ed)) {
               const currentRange = sel.getRangeAt(0);
               const combinedRange = document.createRange();
               try {
@@ -882,82 +1144,28 @@
                 sel.addRange(combinedRange);
               } catch (e) {}
             }
-            shiftState = 0;
-            shiftAnchorRange = null;
-            btnShift.classList.remove('modifier-single', 'modifier-locked');
-            btnShift.textContent = 'Shift';
+            resetShift();
           }
         });
       });
 
-      function moveCursor(direction) {
+      function moveCursor(direction, unit, ctrlUnit) {
         const ed = getActiveEditor();
         ed.focus();
-        const sel = window.getSelection();
-        if (!sel.rangeCount) return;
-
-        const alterMode = (shiftState > 0) ? 'extend' : 'move';
-
-        if (isCtrlActive) {
-          if (direction === 'left') sel.modify(alterMode, 'backward', 'word');
-          else if (direction === 'right') sel.modify(alterMode, 'forward', 'word');
-          else if (direction === 'up') sel.modify(alterMode, 'backward', 'paragraph');
-          else if (direction === 'down') sel.modify(alterMode, 'forward', 'paragraph');
-        } else {
-          if (direction === 'left') sel.modify(alterMode, 'backward', 'character');
-          else if (direction === 'right') sel.modify(alterMode, 'forward', 'character');
-          else if (direction === 'up') sel.modify(alterMode, 'backward', 'line');
-          else if (direction === 'down') sel.modify(alterMode, 'forward', 'line');
-        }
-
-        if (shiftState === 1) {
-          shiftState = 0;
-          shiftAnchorRange = null;
-          btnShift.classList.remove('modifier-single', 'modifier-locked');
-          btnShift.textContent = 'Shift';
-        }
+        const sel = editorSelection(ed);
+        if (typeof sel?.modify !== 'function') return;
+        const { anchorNode, anchorOffset, focusNode, focusOffset } = sel;
+        sel.modify(shiftState ? 'extend' : 'move', direction, isCtrlActive ? ctrlUnit : unit);
+        if (!editorSelection(ed)) sel.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+        if (shiftState === 1) resetShift();
       }
 
-      navLeft.addEventListener('click', () => moveCursor('left'));
-      navRight.addEventListener('click', () => moveCursor('right'));
-      navUp.addEventListener('click', () => moveCursor('up'));
-      navDown.addEventListener('click', () => moveCursor('down'));
-
-      navHome.addEventListener('click', () => {
-        const ed = getActiveEditor();
-        ed.focus();
-        const sel = window.getSelection();
-        if (!sel.rangeCount) return;
-
-        const alterMode = (shiftState > 0) ? 'extend' : 'move';
-        if (isCtrlActive) sel.modify(alterMode, 'backward', 'documentboundary');
-        else sel.modify(alterMode, 'backward', 'lineboundary');
-
-        if (shiftState === 1) {
-          shiftState = 0;
-          shiftAnchorRange = null;
-          btnShift.classList.remove('modifier-single', 'modifier-locked');
-          btnShift.textContent = 'Shift';
-        }
-      });
-
-      navEnd.addEventListener('click', () => {
-        const ed = getActiveEditor();
-        ed.focus();
-        const sel = window.getSelection();
-        if (!sel.rangeCount) return;
-
-        const alterMode = (shiftState > 0) ? 'extend' : 'move';
-        if (isCtrlActive) sel.modify(alterMode, 'forward', 'documentboundary');
-        else sel.modify(alterMode, 'forward', 'lineboundary');
-
-        if (shiftState === 1) {
-          shiftState = 0;
-          shiftAnchorRange = null;
-          btnShift.classList.remove('modifier-single', 'modifier-locked');
-          btnShift.textContent = 'Shift';
-        }
-      });
+      navLeft.addEventListener('click', () => moveCursor('backward', 'character', 'word'));
+      navRight.addEventListener('click', () => moveCursor('forward', 'character', 'word'));
+      navUp.addEventListener('click', () => moveCursor('backward', 'line', 'paragraph'));
+      navDown.addEventListener('click', () => moveCursor('forward', 'line', 'paragraph'));
+      navHome.addEventListener('click', () => moveCursor('backward', 'lineboundary', 'documentboundary'));
+      navEnd.addEventListener('click', () => moveCursor('forward', 'lineboundary', 'documentboundary'));
 
       window.addEventListener('DOMContentLoaded', initApp);
     })();
