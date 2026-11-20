@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+  <title>Mobile Dual-Doc Text Editor</title>
+  <style>
+    :root {
+      --bg-color: #121212;
+      --surface-color: #1e1e1e;
+      --border-color: #333333;
+      --text-color: #e0e0e0;
+      --accent-color: #007acc;
+      --accent-hover: #005999;
+      --active-color: #ff9800;
+      --active-color-locked: #e65100;
+      --pane-active-border: #007acc;
+      --font-size: 16px;
+      --top-bar-height: 86px;
+      --bottom-bar-height: 82px;
+    }
+
+    .light-theme {
+      --bg-color: #f5f5f5;
+      --surface-color: #ffffff;
+      --border-color: #dddddd;
+      --text-color: #212121;
+      --accent-color: #0056b3;
+      --accent-hover: #003d82;
+      --active-color: #e65100;
+      --active-color-locked: #b71c1c;
+      --pane-active-border: #0056b3;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Resizable Application Shell via Visual Viewport */
+    #app {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background-color: var(--bg-color);
+    }
+
+    /* Multi-line Floating Top Menu */
+    .top-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background-color: var(--surface-color);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      gap: 6px;
+      z-index: 20;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+
+    .file-info {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+
+    .file-title-input {
+      background: transparent;
+      border: none;
+      border-bottom: 1px dashed transparent;
+      color: var(--text-color);
+      font-size: 0.85rem;
+      font-weight: 600;
+      outline: none;
+      max-width: 160px;
+    }
+
+    .file-title-input:focus {
+      border-bottom-color: var(--accent-color);
+    }
+
+    .button-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .btn {
+      background: var(--bg-color);
+      color: var(--text-color);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 36px;
+      min-height: 36px;
+      white-space: nowrap;
+      touch-action: manipulation;
+      transition: background-color 0.15s, border-color 0.15s;
+    }
+
+    .btn:active, .btn.active {
+      background-color: var(--accent-color);
+      color: #ffffff;
+      border-color: var(--accent-color);
+    }
+
+    .btn.modifier-single {
+      background-color: var(--active-color);
+      color: #ffffff;
+      border-color: var(--active-color);
+    }
+
+    .btn.modifier-locked {
+      background-color: var(--active-color-locked);
+      color: #ffffff;
+      border-color: var(--active-color-locked);
+    }
+
+    .separator {
+      width: 1px;
+      height: 20px;
+      background-color: var(--border-color);
+      margin: 0 2px;
+      flex-shrink: 0;
+    }
+
+    /* Workspace / Document View Container */
+    .workspace {
+      position: absolute;
+      top: var(--top-bar-height);
+      bottom: var(--bottom-bar-height);
+      left: 0;
+      right: 0;
+      display: flex;
+      gap: 2px;
+      background-color: var(--border-color);
+      overflow: hidden;
+      transition: top 0.2s ease, bottom 0.2s ease;
+    }
+
+    /* Viewport extensions when toolbars are toggled off */
+    body.top-hidden .top-bar {
+      transform: translateY(-100%);
+      opacity: 0;
+      pointer-events: none;
+    }
+    body.top-hidden .workspace {
+      top: 0px !important;
+    }
+
+    body.bottom-hidden .bottom-bar {
+      transform: translateY(100%);
+      opacity: 0;
+      pointer-events: none;
+    }
+    body.bottom-hidden .workspace {
+      bottom: 0px !important;
+    }
+
+    /* Pane & Canvas Layout */
+    .doc-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--bg-color);
+      position: relative;
+      outline: 2px solid transparent;
+      transition: outline-color 0.2s;
+      overflow: hidden;
+    }
+
+    .doc-pane.active-pane {
+      outline-color: var(--pane-active-border);
+      z-index: 2;
+    }
+
+    .pane-header {
+      background-color: var(--surface-color);
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-color);
+      color: var(--text-color);
+    }
+
+    .pane-badge {
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+    }
+
+    .doc-pane.active-pane .pane-badge {
+      background-color: var(--accent-color);
+      color: #fff;
+    }
+
+    .editor-container {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: auto;
+      padding: 12px;
+      position: relative;
+      touch-action: pan-x pan-y pinch-zoom;
+    }
+
+    .editor {
+      width: 100%;
+      box-sizing: border-box;
+      min-height: calc(100% + 100vh - 4em);
+      padding-bottom: calc(100vh - 4em) !important;
+      outline: none;
+      font-family: "Courier New", Courier, monospace, monospace;
+      font-size: var(--font-size);
+      line-height: 1.5;
+      color: var(--text-color);
+      user-select: text;
+      -webkit-user-select: text;
+      white-space: pre-wrap;
+      word-break: break-word;
+      tab-size: 4;
+    }
+
+    .editor.no-wrap {
+      white-space: pre !important;
+      word-break: normal !important;
+    }
+
+    /* Floating Bottom Menu */
+    .bottom-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background-color: var(--surface-color);
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 6px 8px;
+      z-index: 20;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+
+    .bar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .bar-row::-webkit-scrollbar {
+      display: none;
+    }
+
+    /* Minimalist Floating Circle Menu Toggle Button */
+    .floating-toggle-circle {
+      position: fixed;
+      bottom: calc(var(--bottom-bar-height) + 12px);
+      right: 16px;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background-color: var(--accent-color);
+      border: 2px solid rgba(255, 255, 255, 0.25);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      z-index: 100;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: bottom 0.2s ease, transform 0.15s, background-color 0.2s;
+      outline: none;
+    }
+
+    body.bottom-hidden .floating-toggle-circle {
+      bottom: 16px;
+    }
+
+    .floating-toggle-circle:active {
+      transform: scale(0.92);
+      background-color: var(--accent-hover);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    #fileInput {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="app">
+    <!-- Multi-Line Floating Top Menu (File & Multi-Doc Controls) -->
+    <header class="top-bar" id="topBar">
+      <div class="file-info">
+        <span>📄</span>
+        <input type="text" id="activeDocTitle" class="file-title-input" value="new 1.txt" spellcheck="false" title="Click to rename document" />
+      </div>
+
+      <div class="button-group">
+        <button class="btn" id="btnNew" title="New Document">New</button>
+        <button class="btn" id="btnOpen" title="Open File">Open</button>
+        <button class="btn" id="btnSave" title="Save File">Save</button>
+        <div class="separator"></div>
+        <button class="btn" id="btnSplit" title="Toggle Dual Document Split View">Split</button>
+        <button class="btn hidden" id="btnLayout" title="Toggle Split Layout (Side-by-Side / Top-Bottom)">Layout</button>
+        <button class="btn hidden" id="btnSyncScroll" title="Toggle Synced Scrolling">Sync</button>
+        <div class="separator"></div>
+        <button class="btn active" id="btnWrap" title="Toggle Text Wrap">Wrap</button>
+        <button class="btn" id="btnTheme" title="Toggle Dark/Light Mode">🌙</button>
+      </div>
+    </header>
+
+    <!-- Workspace Container (Dual-Pane Split Support) -->
+    <main class="workspace" id="workspace">
+      <!-- Document Pane 1 -->
+      <div class="doc-pane active-pane" id="pane1" data-doc-id="1">
+        <div class="pane-header">
+          <span id="paneTitle1">new 1.txt</span>
+          <span class="pane-badge" id="paneBadge1">Active</span>
+        </div>
+        <div class="editor-container" id="container1">
+          <div class="editor" id="editor1" contenteditable="true" spellcheck="true" autocorrect="on" autocapitalize="sentences"></div>
+        </div>
+      </div>
+
+      <!-- Document Pane 2 (Hidden until Split is enabled) -->
+      <div class="doc-pane hidden" id="pane2" data-doc-id="2">
+        <div class="pane-header">
+          <span id="paneTitle2">new 2.txt</span>
+          <span class="pane-badge" id="paneBadge2">Inactive</span>
+        </div>
+        <div class="editor-container" id="container2">
+          <div class="editor" id="editor2" contenteditable="true" spellcheck="true" autocorrect="on" autocapitalize="sentences"></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Floating Bottom Menu (Formatting, Zoom & Navigation) -->
+    <footer class="bottom-bar" id="bottomBar">
+      <!-- Formatting & App Zoom Row -->
+      <div class="bar-row">
+        <div class="button-group">
+          <button class="btn" data-cmd="bold" title="Bold"><b>B</b></button>
+          <button class="btn" data-cmd="italic" title="Italic"><i>I</i></button>
+          <button class="btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+          <button class="btn" data-cmd="insertUnorderedList" title="Bullet List">• List</button>
+          <button class="btn" data-cmd="outdent" title="Outdent">⇤</button>
+          <button class="btn" data-cmd="indent" title="Indent">⇥</button>
+        </div>
+        <div class="separator"></div>
+        <div class="button-group">
+          <button class="btn" id="btnZoomOut" title="Zoom Out View (Smaller Text)">A-</button>
+          <button class="btn" id="btnZoomIn" title="Zoom In View (Larger Text)">A+</button>
+        </div>
+      </div>
+
+      <!-- Shift/Ctrl Modifiers & Cursor Navigation Row -->
+      <div class="bar-row">
+        <div class="button-group">
+          <button class="btn" id="btnShift" title="Shift Key (Off -> Set Point -> Locked)">Shift</button>
+          <button class="btn" id="btnCtrl" title="Ctrl Key (Word / Boundary Jump Toggle)">Ctrl</button>
+        </div>
+        <div class="separator"></div>
+        <div class="button-group">
+          <button class="btn" id="navLeft" title="Move Left">◀</button>
+          <button class="btn" id="navUp" title="Move Up">▲</button>
+          <button class="btn" id="navDown" title="Move Down">▼</button>
+          <button class="btn" id="navRight" title="Move Right">▶</button>
+        </div>
+        <div class="separator"></div>
+        <div class="button-group">
+          <button class="btn" id="navHome" title="Home Position">Home</button>
+          <button class="btn" id="navEnd" title="End Position">End</button>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Minimalist Circle Menu Toggle -->
+  <button class="floating-toggle-circle" id="btnToggleMenus" title="Toggle UI Toolbars"></button>
+
+  <!-- Hidden Native File Input -->
+  <input type="file" id="fileInput" accept=".txt,.md,.js,.html,.css,.json,.csv,text/*" />
+
+  <script>
+    (function () {
+      // DOM References
+      const app = document.getElementById('app');
+      const topBar = document.getElementById('topBar');
+      const bottomBar = document.getElementById('bottomBar');
+      const workspace = document.getElementById('workspace');
+      const btnToggleMenus = document.getElementById('btnToggleMenus');
+      const activeDocTitle = document.getElementById('activeDocTitle');
+      const fileInput = document.getElementById('fileInput');
+
+      // Top Menu Buttons
+      const btnNew = document.getElementById('btnNew');
+      const btnOpen = document.getElementById('btnOpen');
+      const btnSave = document.getElementById('btnSave');
+      const btnSplit = document.getElementById('btnSplit');
+      const btnLayout = document.getElementById('btnLayout');
+      const btnSyncScroll = document.getElementById('btnSyncScroll');
+      const btnWrap = document.getElementById('btnWrap');
+      const btnTheme = document.getElementById('btnTheme');
+
+      // Panes & Editors
+      const pane1 = document.getElementById('pane1');
+      const pane2 = document.getElementById('pane2');
+      const paneTitle1 = document.getElementById('paneTitle1');
+      const paneTitle2 = document.getElementById('paneTitle2');
+      const paneBadge1 = document.getElementById('paneBadge1');
+      const paneBadge2 = document.getElementById('paneBadge2');
+      const editor1 = document.getElementById('editor1');
+      const editor2 = document.getElementById('editor2');
+      const container1 = document.getElementById('container1');
+      const container2 = document.getElementById('container2');
+
+      // Bottom Menu Buttons
+      const btnZoomOut = document.getElementById('btnZoomOut');
+      const btnZoomIn = document.getElementById('btnZoomIn');
+      const btnShift = document.getElementById('btnShift');
+      const btnCtrl = document.getElementById('btnCtrl');
+      const navLeft = document.getElementById('navLeft');
+      const navUp = document.getElementById('navUp');
+      const navDown = document.getElementById('navDown');
+      const navRight = document.getElementById('navRight');
+      const navHome = document.getElementById('navHome');
+      const navEnd = document.getElementById('navEnd');
+
+      // State Variables
+      let activeDocId = 1;
+      let isSplit = false;
+      let splitMode = 'side'; // 'side' or 'stack'
+      let syncScroll = false;
+      let fontSize = 16;
+      let isDarkTheme = true;
+      let isTextWrapped = true;
+      let shiftState = 0; // 0 = OFF, 1 = SINGLE (Set Point), 2 = LOCKED
+      let isCtrlActive = false;
+      let shiftAnchorRange = null;
+
+      // Filenames per pane
+      const fileNames = { 1: 'new 1.txt', 2: 'new 2.txt' };
+      // File handles are session-only; names and contents still persist locally.
+      const fileHandles = { 1: null, 2: null };
+      let nextNewNumber = 3;
+      let pendingOpenId = null;
+      let fileBusy = false;
+      const STORAGE_NEXT_NAME = 'mobile_editor_next_name';
+
+      // LocalStorage Keys
+      const STORAGE_DOC1 = 'mobile_editor_doc1';
+      const STORAGE_DOC2 = 'mobile_editor_doc2';
+      const STORAGE_FN1 = 'mobile_editor_fn1';
+      const STORAGE_FN2 = 'mobile_editor_fn2';
+
+      /* 1. Visual Viewport API for dynamic keyboard/screen resizes */
+      function updateVisualViewport() {
+        if (window.visualViewport) {
+          app.style.height = window.visualViewport.height + 'px';
+          app.style.top = window.visualViewport.offsetTop + 'px';
+          app.style.left = window.visualViewport.offsetLeft + 'px';
+          app.style.width = window.visualViewport.width + 'px';
+        }
+        updateBarDimensions();
+      }
+
+      function updateBarDimensions() {
+        if (topBar && bottomBar) {
+          const topH = topBar.offsetHeight;
+          const bottomH = bottomBar.offsetHeight;
+          if (topH > 0) document.documentElement.style.setProperty('--top-bar-height', topH + 'px');
+          if (bottomH > 0) document.documentElement.style.setProperty('--bottom-bar-height', bottomH + 'px');
+        }
+      }
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', updateVisualViewport);
+        window.visualViewport.addEventListener('scroll', updateVisualViewport);
+      }
+      window.addEventListener('resize', updateBarDimensions);
+
+      /* 2. Application Init & Persistence */
+      function initApp() {
+        updateVisualViewport();
+
+        // Restore filenames & contents
+        fileNames[1] = localStorage.getItem(STORAGE_FN1) || 'new 1.txt';
+        fileNames[2] = localStorage.getItem(STORAGE_FN2) || 'new 2.txt';
+        nextNewNumber = Math.max(3, Number(localStorage.getItem(STORAGE_NEXT_NAME)) || 3);
+        for (const name of Object.values(fileNames)) {
+          const match = /^new (\d+)\.txt$/i.exec(name);
+          if (match) nextNewNumber = Math.max(nextNewNumber, Number(match[1]) + 1);
+        }
+        paneTitle1.textContent = fileNames[1];
+        paneTitle2.textContent = fileNames[2];
+
+        const doc1Content = localStorage.getItem(STORAGE_DOC1);
+        const doc2Content = localStorage.getItem(STORAGE_DOC2);
+
+        editor1.textContent = doc1Content !== null ? doc1Content : 'Welcome to Document 1.\n\nUse the top bar for file management & split options, and the bottom toolbar for formatting, zoom, and cursor navigation.';
+        editor2.textContent = doc2Content !== null ? doc2Content : 'Welcome to Document 2.\n\nThis is your secondary document buffer for side-by-side editing.';
+
+        setActivePane(1);
+
+        // Auto-save listeners
+        editor1.addEventListener('input', saveStorage);
+        editor2.addEventListener('input', saveStorage);
+        activeDocTitle.addEventListener('input', () => {
+          const name = activeDocTitle.value.trim();
+          if (name && name !== fileNames[activeDocId]) {
+            fileHandles[activeDocId] = null;
+            setDocumentName(activeDocId, name, false);
+            saveStorage();
+          }
+        });
+        activeDocTitle.addEventListener('blur', () => {
+          activeDocTitle.value = fileNames[activeDocId];
+        });
+        activeDocTitle.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            activeDocTitle.blur();
+          }
+        });
+      }
+
+      function saveStorage() {
+        localStorage.setItem(STORAGE_DOC1, editor1.textContent);
+        localStorage.setItem(STORAGE_DOC2, editor2.textContent);
+        localStorage.setItem(STORAGE_FN1, fileNames[1]);
+        localStorage.setItem(STORAGE_FN2, fileNames[2]);
+        localStorage.setItem(STORAGE_NEXT_NAME, String(nextNewNumber));
+      }
+
+      function getActiveEditor() {
+        return activeDocId === 1 ? editor1 : editor2;
+      }
+
+      /* 3. Active Pane Selection */
+      function setActivePane(id) {
+        activeDocId = id;
+        if (id === 1) {
+          pane1.classList.add('active-pane');
+          pane2.classList.remove('active-pane');
+          paneBadge1.textContent = 'Active';
+          paneBadge2.textContent = 'Inactive';
+        } else {
+          pane2.classList.add('active-pane');
+          pane1.classList.remove('active-pane');
+          paneBadge2.textContent = 'Active';
+          paneBadge1.textContent = 'Inactive';
+        }
+        activeDocTitle.value = fileNames[id];
+      }
+
+      pane1.addEventListener('pointerdown', () => setActivePane(1));
+      pane2.addEventListener('pointerdown', () => setActivePane(2));
+      editor1.addEventListener('focus', () => setActivePane(1));
+      editor2.addEventListener('focus', () => setActivePane(2));
+
+      /* 4. Top Menu Functions & File Operations */
+      btnToggleMenus.addEventListener('click', () => {
+        document.body.classList.toggle('top-hidden');
+        document.body.classList.toggle('bottom-hidden');
+      });
+
+      // Split View Controls
+      btnSplit.addEventListener('click', () => {
+        isSplit = !isSplit;
+        if (isSplit) {
+          pane2.classList.remove('hidden');
+          btnSplit.classList.add('active');
+          btnLayout.classList.remove('hidden');
+          btnSyncScroll.classList.remove('hidden');
+          workspace.style.flexDirection = (splitMode === 'side') ? 'row' : 'column';
+        } else {
+          // If Pane 2 was active when closing split, swap Pane 2 into Pane 1 so the active doc remains visible
+          if (activeDocId === 2) {
+            const tempContent = editor1.textContent;
+            const tempFn = fileNames[1];
+            [fileHandles[1], fileHandles[2]] = [fileHandles[2], fileHandles[1]];
+
+            editor1.textContent = editor2.textContent;
+            fileNames[1] = fileNames[2];
+            paneTitle1.textContent = fileNames[1];
+
+            editor2.textContent = tempContent;
+            fileNames[2] = tempFn;
+            paneTitle2.textContent = fileNames[2];
+
+            saveStorage();
+          }
+
+          pane2.classList.add('hidden');
+          btnSplit.classList.remove('active');
+          btnLayout.classList.add('hidden');
+          btnSyncScroll.classList.add('hidden');
+          setActivePane(1);
+        }
+        updateBarDimensions();
+      });
+
+      btnLayout.addEventListener('click', () => {
+        splitMode = (splitMode === 'side') ? 'stack' : 'side';
+        btnLayout.classList.toggle('active', splitMode === 'stack');
+        workspace.style.flexDirection = (splitMode === 'side') ? 'row' : 'column';
+      });
+
+      btnSyncScroll.addEventListener('click', () => {
+        syncScroll = !syncScroll;
+        btnSyncScroll.classList.toggle('active', syncScroll);
+      });
+
+      // Synced Scroll Handlers
+      let isScrolling = false;
+      container1.addEventListener('scroll', () => {
+        if (!isSplit || !syncScroll || isScrolling) return;
+        isScrolling = true;
+        const pct = container1.scrollTop / (container1.scrollHeight - container1.clientHeight || 1);
+        container2.scrollTop = pct * (container2.scrollHeight - container2.clientHeight);
+        setTimeout(() => { isScrolling = false; }, 40);
+      });
+
+      container2.addEventListener('scroll', () => {
+        if (!isSplit || !syncScroll || isScrolling) return;
+        isScrolling = true;
+        const pct = container2.scrollTop / (container2.scrollHeight - container2.clientHeight || 1);
+        container1.scrollTop = pct * (container1.scrollHeight - container1.clientHeight);
+        setTimeout(() => { isScrolling = false; }, 40);
+      });
+
+      // Theme & Wrap Toggles
+      btnTheme.addEventListener('click', () => {
+        isDarkTheme = !isDarkTheme;
+        if (isDarkTheme) {
+          document.body.classList.remove('light-theme');
+          btnTheme.textContent = '🌙';
+        } else {
+          document.body.classList.add('light-theme');
+          btnTheme.textContent = '☀️';
+        }
+      });
+
+      btnWrap.addEventListener('click', () => {
+        isTextWrapped = !isTextWrapped;
+        editor1.classList.toggle('no-wrap', !isTextWrapped);
+        editor2.classList.toggle('no-wrap', !isTextWrapped);
+        btnWrap.classList.toggle('active', isTextWrapped);
+      });
+
+      // File New, Open, Save
+      function setDocumentName(id, name, updateInput = true) {
+        fileNames[id] = name;
+        (id === 1 ? paneTitle1 : paneTitle2).textContent = name;
+        if (updateInput && activeDocId === id) activeDocTitle.value = name;
+      }
+
+      function setFileBusy(busy) {
+        fileBusy = busy;
+        // Prevent document replacement/swapping while a picker or disk write is pending.
+        [btnNew, btnOpen, btnSave, btnSplit, activeDocTitle].forEach(el => el.disabled = busy);
+      }
+
+      btnNew.addEventListener('click', () => {
+        if (fileBusy) return;
+        const activeEd = getActiveEditor();
+        if (activeEd.textContent.trim().length > 0) {
+          if (!confirm(`Clear document ${activeDocId} (${fileNames[activeDocId]})?`)) return;
+        }
+        let name;
+        do { name = `new ${nextNewNumber++}.txt`; }
+        while (Object.values(fileNames).includes(name));
+        fileHandles[activeDocId] = null;
+        setDocumentName(activeDocId, name);
+        activeEd.textContent = '';
+        saveStorage();
+        activeEd.focus();
+      });
+
+      async function loadDocument(id, file, handle = null) {
+        const content = await file.text();
+        const editor = id === 1 ? editor1 : editor2;
+        editor.textContent = content;
+        fileHandles[id] = handle;
+        setDocumentName(id, file.name);
+        saveStorage();
+        if (activeDocId === id) editor.focus();
+      }
+
+      btnOpen.addEventListener('click', async () => {
+        if (fileBusy) return;
+        const id = activeDocId;
+        if (typeof window.showOpenFilePicker === 'function') {
+          setFileBusy(true);
+          try {
+            const [handle] = await window.showOpenFilePicker();
+            await loadDocument(id, await handle.getFile(), handle);
+            return;
+          } catch (error) {
+            if (error.name === 'AbortError') return;
+            alert('The file could not be opened. Please try the standard file chooser.');
+          } finally {
+            setFileBusy(false);
+          }
+        }
+        pendingOpenId = id;
+        fileInput.click();
+      });
+
+      fileInput.addEventListener('cancel', () => { pendingOpenId = null; });
+      fileInput.addEventListener('change', async (event) => {
+        const file = event.target.files[0];
+        const id = pendingOpenId;
+        pendingOpenId = null;
+        fileInput.value = '';
+        if (!file || id === null) return;
+        setFileBusy(true);
+        try {
+          await loadDocument(id, file);
+        } catch (error) {
+          alert('The file could not be read. Your document has not been replaced.');
+        } finally {
+          setFileBusy(false);
+        }
+      });
+
+      function downloadDocument(content, name) {
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      btnSave.addEventListener('click', async () => {
+        if (fileBusy) return;
+        const id = activeDocId;
+        const name = fileNames[id];
+        const content = getActiveEditor().textContent;
+        setFileBusy(true);
+        try {
+          let handle = fileHandles[id];
+          if (!handle && typeof window.showSaveFilePicker === 'function') {
+            handle = await window.showSaveFilePicker({ suggestedName: name });
+          }
+          if (handle) {
+            const writable = await handle.createWritable();
+            try {
+              await writable.write(content);
+              await writable.close();
+            } catch (error) {
+              try { await writable.abort(); } catch (_) { /* Already closed. */ }
+              throw error;
+            }
+            fileHandles[id] = handle;
+            setDocumentName(id, handle.name);
+            saveStorage();
+          } else {
+            downloadDocument(content, name);
+          }
+        } catch (error) {
+          if (error.name !== 'AbortError') {
+            alert('Could not save directly to the file. A download will be offered instead.');
+            downloadDocument(content, name);
+          }
+        } finally {
+          setFileBusy(false);
+        }
+      });
+
+      /* 5. Formatting & Font View Zoom */
+      document.querySelectorAll('.bottom-bar .btn[data-cmd]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const cmd = btn.getAttribute('data-cmd');
+          const ed = getActiveEditor();
+          ed.focus();
+          document.execCommand(cmd, false, null);
+          saveStorage();
+        });
+      });
+
+      btnZoomIn.addEventListener('click', () => {
+        fontSize = Math.min(fontSize + 2, 36);
+        document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+      });
+
+      btnZoomOut.addEventListener('click', () => {
+        fontSize = Math.max(fontSize - 2, 10);
+        document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+      });
+
+      /* 6. Shift/Ctrl Modifiers & Cursor Navigation */
+      btnShift.addEventListener('click', () => {
+        shiftState = (shiftState + 1) % 3;
+        btnShift.classList.remove('modifier-single', 'modifier-locked');
+
+        if (shiftState === 1) {
+          btnShift.classList.add('modifier-single');
+          btnShift.textContent = 'Shift (1)';
+          const sel = window.getSelection();
+          if (sel.rangeCount > 0) shiftAnchorRange = sel.getRangeAt(0).cloneRange();
+        } else if (shiftState === 2) {
+          btnShift.classList.add('modifier-locked');
+          btnShift.textContent = 'Shift (2)';
+        } else {
+          btnShift.textContent = 'Shift';
+          shiftAnchorRange = null;
+        }
+      });
+
+      btnCtrl.addEventListener('click', () => {
+        isCtrlActive = !isCtrlActive;
+        btnCtrl.classList.toggle('active', isCtrlActive);
+      });
+
+      // Shift single-tap range expansion on touch/click inside editor
+      [editor1, editor2].forEach(ed => {
+        ed.addEventListener('click', () => {
+          if (shiftState === 1 && shiftAnchorRange) {
+            const sel = window.getSelection();
+            if (sel.rangeCount > 0) {
+              const currentRange = sel.getRangeAt(0);
+              const combinedRange = document.createRange();
+              try {
+                if (shiftAnchorRange.compareBoundaryPoints(Range.START_TO_START, currentRange) <= 0) {
+                  combinedRange.setStart(shiftAnchorRange.startContainer, shiftAnchorRange.startOffset);
+                  combinedRange.setEnd(currentRange.endContainer, currentRange.endOffset);
+                } else {
+                  combinedRange.setStart(currentRange.startContainer, currentRange.startOffset);
+                  combinedRange.setEnd(shiftAnchorRange.endContainer, shiftAnchorRange.endOffset);
+                }
+                sel.removeAllRanges();
+                sel.addRange(combinedRange);
+              } catch (e) {}
+            }
+            shiftState = 0;
+            shiftAnchorRange = null;
+            btnShift.classList.remove('modifier-single', 'modifier-locked');
+            btnShift.textContent = 'Shift';
+          }
+        });
+      });
+
+      function moveCursor(direction) {
+        const ed = getActiveEditor();
+        ed.focus();
+        const sel = window.getSelection();
+        if (!sel.rangeCount) return;
+
+        const alterMode = (shiftState > 0) ? 'extend' : 'move';
+
+        if (isCtrlActive) {
+          if (direction === 'left') sel.modify(alterMode, 'backward', 'word');
+          else if (direction === 'right') sel.modify(alterMode, 'forward', 'word');
+          else if (direction === 'up') sel.modify(alterMode, 'backward', 'paragraph');
+          else if (direction === 'down') sel.modify(alterMode, 'forward', 'paragraph');
+        } else {
+          if (direction === 'left') sel.modify(alterMode, 'backward', 'character');
+          else if (direction === 'right') sel.modify(alterMode, 'forward', 'character');
+          else if (direction === 'up') sel.modify(alterMode, 'backward', 'line');
+          else if (direction === 'down') sel.modify(alterMode, 'forward', 'line');
+        }
+
+        if (shiftState === 1) {
+          shiftState = 0;
+          shiftAnchorRange = null;
+          btnShift.classList.remove('modifier-single', 'modifier-locked');
+          btnShift.textContent = 'Shift';
+        }
+      }
+
+      navLeft.addEventListener('click', () => moveCursor('left'));
+      navRight.addEventListener('click', () => moveCursor('right'));
+      navUp.addEventListener('click', () => moveCursor('up'));
+      navDown.addEventListener('click', () => moveCursor('down'));
+
+      navHome.addEventListener('click', () => {
+        const ed = getActiveEditor();
+        ed.focus();
+        const sel = window.getSelection();
+        if (!sel.rangeCount) return;
+
+        const alterMode = (shiftState > 0) ? 'extend' : 'move';
+        if (isCtrlActive) sel.modify(alterMode, 'backward', 'documentboundary');
+        else sel.modify(alterMode, 'backward', 'lineboundary');
+
+        if (shiftState === 1) {
+          shiftState = 0;
+          shiftAnchorRange = null;
+          btnShift.classList.remove('modifier-single', 'modifier-locked');
+          btnShift.textContent = 'Shift';
+        }
+      });
+
+      navEnd.addEventListener('click', () => {
+        const ed = getActiveEditor();
+        ed.focus();
+        const sel = window.getSelection();
+        if (!sel.rangeCount) return;
+
+        const alterMode = (shiftState > 0) ? 'extend' : 'move';
+        if (isCtrlActive) sel.modify(alterMode, 'forward', 'documentboundary');
+        else sel.modify(alterMode, 'forward', 'lineboundary');
+
+        if (shiftState === 1) {
+          shiftState = 0;
+          shiftAnchorRange = null;
+          btnShift.classList.remove('modifier-single', 'modifier-locked');
+          btnShift.textContent = 'Shift';
+        }
+      });
+
+      window.addEventListener('DOMContentLoaded', initApp);
+    })();
+  </script>
+</body>
+</html>
