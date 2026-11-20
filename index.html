@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
-  <title>Dual Doc</title>
+  <title>Dual Doc v0.03</title>
   <style>
     :root {
       --bg-color: #121212;
@@ -106,6 +106,11 @@
 
     .file-title-input:focus {
       border-bottom-color: var(--accent-color);
+    }
+
+    .app-version {
+      font-size: 0.7rem;
+      opacity: 0.75;
     }
 
     .button-group {
@@ -236,33 +241,45 @@
 
     .editor-container {
       flex: 1;
-      overflow-y: auto;
-      overflow-x: auto;
+      min-height: 0;
       padding: 12px;
-      position: relative;
-      touch-action: pan-x pan-y pinch-zoom;
     }
 
     .editor {
+      display: block;
       width: 100%;
-      box-sizing: border-box;
-      min-height: calc(100% + 100vh - 4em);
-      padding-bottom: calc(100vh - 4em) !important;
+      height: 100%;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
       outline: none;
-      font-family: "Courier New", Courier, monospace, monospace;
-      font-size: var(--font-size);
-      line-height: 1.5;
+      resize: none;
+      background: transparent;
       color: var(--text-color);
       user-select: text;
       -webkit-user-select: text;
+    }
+
+    .editor, .caret-measure {
+      font-family: "Courier New", Courier, monospace;
+      font-size: var(--font-size);
+      line-height: 1.5;
       white-space: pre-wrap;
-      word-break: break-word;
+      overflow-wrap: break-word;
       tab-size: 4;
     }
 
-    .editor.no-wrap {
-      white-space: pre !important;
-      word-break: normal !important;
+    .editor.no-wrap, .caret-measure.no-wrap {
+      white-space: pre;
+      overflow-wrap: normal;
+    }
+
+    .caret-measure {
+      position: fixed;
+      top: 0;
+      left: 0;
+      visibility: hidden;
+      pointer-events: none;
     }
 
     /* Floating Bottom Menu */
@@ -367,6 +384,7 @@
       <div class="file-info">
         <span>📄</span>
         <input type="text" id="activeDocTitle" class="file-title-input" value="new 1.txt" spellcheck="false" title="Click to rename document" />
+        <span class="app-version" id="appVersion"></span>
       </div>
 
       <div class="button-group">
@@ -391,8 +409,8 @@
           <span id="paneTitle1">new 1.txt</span>
           <span class="pane-badge" id="paneBadge1">Active</span>
         </div>
-        <div class="editor-container" id="container1">
-          <div class="editor" id="editor1" contenteditable="true" spellcheck="true" autocorrect="on" autocapitalize="sentences"></div>
+        <div class="editor-container">
+          <textarea class="editor" id="editor1" aria-labelledby="paneTitle1" wrap="soft" spellcheck="true" autocorrect="on" autocapitalize="sentences"></textarea>
         </div>
       </div>
 
@@ -402,23 +420,18 @@
           <span id="paneTitle2">new 2.txt</span>
           <span class="pane-badge" id="paneBadge2">Inactive</span>
         </div>
-        <div class="editor-container" id="container2">
-          <div class="editor" id="editor2" contenteditable="true" spellcheck="true" autocorrect="on" autocapitalize="sentences"></div>
+        <div class="editor-container">
+          <textarea class="editor" id="editor2" aria-labelledby="paneTitle2" wrap="soft" spellcheck="true" autocorrect="on" autocapitalize="sentences"></textarea>
         </div>
       </div>
     </main>
 
-    <!-- Floating Bottom Menu (Formatting, Zoom & Navigation) -->
+    <!-- Floating Bottom Menu (Indentation, Zoom & Navigation) -->
     <footer class="bottom-bar" id="bottomBar">
-      <!-- Formatting & App Zoom Row -->
       <div class="bar-row">
         <div class="button-group">
-          <button class="btn" data-cmd="bold" title="Bold"><b>B</b></button>
-          <button class="btn" data-cmd="italic" title="Italic"><i>I</i></button>
-          <button class="btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
-          <button class="btn" data-cmd="insertUnorderedList" title="Bullet List">• List</button>
-          <button class="btn" data-cmd="outdent" title="Outdent">⇤</button>
-          <button class="btn" data-cmd="indent" title="Indent">⇥</button>
+          <button class="btn" id="btnOutdent" aria-label="Outdent" title="Outdent">⇤</button>
+          <button class="btn" id="btnIndent" aria-label="Indent" title="Indent">⇥</button>
         </div>
         <div class="separator"></div>
         <div class="button-group">
@@ -451,6 +464,7 @@
 
   <!-- Minimalist Circle Menu Toggle -->
   <button class="floating-toggle-circle" id="btnToggleMenus" title="Toggle UI Toolbars"></button>
+  <div class="caret-measure" id="caretMeasure" aria-hidden="true"></div>
 
   <!-- Hidden Native File Input -->
   <input type="file" id="fileInput" accept=".txt,.md,.js,.html,.css,.json,.csv,text/*" />
@@ -502,10 +516,11 @@
       const paneBadge2 = document.getElementById('paneBadge2');
       const editor1 = document.getElementById('editor1');
       const editor2 = document.getElementById('editor2');
-      const container1 = document.getElementById('container1');
-      const container2 = document.getElementById('container2');
+      const caretMeasure = document.getElementById('caretMeasure');
 
       // Bottom Menu Buttons
+      const btnIndent = document.getElementById('btnIndent');
+      const btnOutdent = document.getElementById('btnOutdent');
       const btnZoomOut = document.getElementById('btnZoomOut');
       const btnZoomIn = document.getElementById('btnZoomIn');
       const btnShift = document.getElementById('btnShift');
@@ -528,7 +543,7 @@
       let isTextWrapped = true;
       let shiftState = 0; // 0 = OFF, 1 = SINGLE (Set Point), 2 = LOCKED
       let isCtrlActive = false;
-      let shiftAnchorRange = null;
+      let shiftAnchor = null;
 
       const editors = { 1: editor1, 2: editor2 };
       const panes = { 1: pane1, 2: pane2 };
@@ -540,8 +555,6 @@
       let fileBusy = false;
       const STORAGE_NEXT_NAME = 'mobile_editor_next_name';
       const STORAGE_VIEW = 'dual_doc_view';
-      const lineBlocks = new Set(['ADDRESS', 'BLOCKQUOTE', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
-        'LI', 'OL', 'P', 'PRE', 'UL']);
 
       /* 1. Visual Viewport API for dynamic keyboard/screen resizes */
       function updateVisualViewport() {
@@ -604,40 +617,10 @@
 
       function replaceEditorText(id, text) {
         const editor = editors[id];
-        editor.textContent = text;
-        if (text.endsWith('\n')) editor.append(document.createElement('br'));
-      }
-
-      function readEditorText(editor) {
-        // The browser uses block elements for Enter and BRs for line breaks.
-        // A final BR in an editing block is the caret placeholder for its last line.
-        function readChildren(parent, endsLine) {
-          const children = Array.from(parent.childNodes).filter(node =>
-            node.nodeType === Node.ELEMENT_NODE || (node.nodeType === Node.TEXT_NODE && node.data.length));
-          const chunks = [];
-          let inline = '';
-          let hasInline = false;
-          children.forEach((node, index) => {
-            if (node.nodeType === Node.TEXT_NODE) {
-              inline += node.data;
-              hasInline = true;
-            } else if (lineBlocks.has(node.tagName)) {
-              if (hasInline) chunks.push(inline);
-              chunks.push(readChildren(node, true));
-              inline = '';
-              hasInline = false;
-            } else {
-              const terminal = endsLine && index === children.length - 1;
-              const text = node.tagName === 'BR' ? (terminal ? '' : '\n') : readChildren(node, terminal);
-              inline += text;
-              hasInline ||= text.length > 0;
-            }
-          });
-          if (hasInline) chunks.push(inline);
-          return chunks.join('\n');
-        }
-
-        return normalizeLineBreaks(readChildren(editor, true));
+        editor.value = text;
+        editor.setSelectionRange(0, 0);
+        editor.scrollTop = 0;
+        editor.scrollLeft = 0;
       }
 
       function restoreDocument(id, initialText) {
@@ -670,7 +653,7 @@
 
       function updateDocumentText(id) {
         const doc = documents[id];
-        const text = readEditorText(editors[id]);
+        const text = editors[id].value;
         if (doc.text !== text) {
           doc.text = text;
           persistDocument(id);
@@ -701,8 +684,11 @@
       }
 
       function initApp() {
+        const versionLabel = document.getElementById('appVersion');
+        versionLabel.textContent = document.title.split(' ').pop();
+        versionLabel.title = document.title;
         nextNewNumber = Math.max(3, Number(readStorage(STORAGE_NEXT_NAME)) || 3);
-        restoreDocument(1, 'Welcome to Document 1.\n\nUse the top bar for file management & split options, and the bottom toolbar for formatting, zoom, and cursor navigation.');
+        restoreDocument(1, 'Welcome to Document 1.\n\nUse the top bar to open, save, and switch views. Use the bottom toolbar to indent, zoom, and move the cursor.');
         restoreDocument(2, 'Welcome to Document 2.\n\nThis is your secondary document buffer for side-by-side editing.');
         restoreView();
         renderView();
@@ -711,15 +697,7 @@
 
         for (const id of [1, 2]) {
           editors[id].addEventListener('input', () => updateDocumentText(id));
-          editors[id].addEventListener('paste', event => {
-            if (!event.clipboardData) return;
-            event.preventDefault();
-            const text = event.clipboardData.getData('text/plain');
-            if (text) {
-              document.execCommand('insertText', false, normalizeLineBreaks(text));
-              updateDocumentText(id);
-            }
-          });
+          editors[id].addEventListener('blur', () => updateDocumentText(id));
         }
 
         activeDocTitle.addEventListener('input', () => {
@@ -758,11 +736,13 @@
       }
 
       function renderView() {
+        const wrap = isTextWrapped ? 'soft' : 'off';
         for (const id of [1, 2]) {
           // Give the active document the first position without rewriting either editor.
           panes[id].style.order = firstDocId === id ? '0' : '1';
           panes[id].classList.toggle('hidden', !isSplit && firstDocId !== id);
           editors[id].classList.toggle('no-wrap', !isTextWrapped);
+          if (editors[id].wrap !== wrap) editors[id].wrap = wrap;
         }
         workspace.style.flexDirection = splitMode === 'side' ? 'row' : 'column';
         btnSplit.classList.toggle('active', isSplit);
@@ -808,21 +788,17 @@
 
       // Synced Scroll Handlers
       let isScrolling = false;
-      container1.addEventListener('scroll', () => {
-        if (!isSplit || !syncScroll || isScrolling) return;
-        isScrolling = true;
-        const pct = container1.scrollTop / (container1.scrollHeight - container1.clientHeight || 1);
-        container2.scrollTop = pct * (container2.scrollHeight - container2.clientHeight);
-        setTimeout(() => { isScrolling = false; }, 40);
-      });
-
-      container2.addEventListener('scroll', () => {
-        if (!isSplit || !syncScroll || isScrolling) return;
-        isScrolling = true;
-        const pct = container2.scrollTop / (container2.scrollHeight - container2.clientHeight || 1);
-        container1.scrollTop = pct * (container1.scrollHeight - container1.clientHeight);
-        setTimeout(() => { isScrolling = false; }, 40);
-      });
+      for (const id of [1, 2]) {
+        const editor = editors[id];
+        const other = editors[3 - id];
+        editor.addEventListener('scroll', () => {
+          const scrollRange = editor.scrollHeight - editor.clientHeight;
+          if (!isSplit || !syncScroll || isScrolling || scrollRange <= 0) return;
+          isScrolling = true;
+          other.scrollTop = (editor.scrollTop / scrollRange) * (other.scrollHeight - other.clientHeight);
+          setTimeout(() => { isScrolling = false; }, 40);
+        });
+      }
 
       // Theme & Wrap Toggles
       btnTheme.addEventListener('click', () => {
@@ -1058,16 +1034,46 @@
         }
       });
 
-      /* 5. Formatting & Font View Zoom */
-      document.querySelectorAll('.bottom-bar .btn[data-cmd]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const cmd = btn.getAttribute('data-cmd');
-          const ed = getActiveEditor();
-          ed.focus();
-          document.execCommand(cmd, false, null);
-          updateDocumentText(activeDocId);
-        });
-      });
+      /* 5. Indentation & Font View Zoom */
+      function lineStart(text, offset) {
+        return offset > 0 ? text.lastIndexOf('\n', offset - 1) + 1 : 0;
+      }
+
+      function lineEnd(text, offset) {
+        const end = text.indexOf('\n', offset);
+        return end === -1 ? text.length : end;
+      }
+
+      function changeIndent(outdent) {
+        const id = activeDocId;
+        const editor = editors[id];
+        editor.focus({ preventScroll: true });
+        const { value, selectionStart, selectionEnd, selectionDirection } = editor;
+        const hasSelection = selectionStart !== selectionEnd;
+        const start = lineStart(value, selectionStart);
+        const end = lineEnd(value, hasSelection && value[selectionEnd - 1] === '\n' ? selectionEnd - 1 : selectionEnd);
+        const original = value.slice(start, end);
+        const lines = original.split('\n');
+        const changedLines = lines.map(line => outdent ? line.replace(/^(?:\t| {1,4})/, '') : '\t' + line);
+        const replacement = changedLines.join('\n');
+        if (replacement === original) return;
+
+        editor.setSelectionRange(start, end);
+        const command = replacement ? 'insertText' : 'delete';
+        if (!document.execCommand(command, false, replacement)) {
+          editor.setRangeText(replacement, start, end);
+        }
+        if (hasSelection) {
+          editor.setSelectionRange(start, start + replacement.length, selectionDirection);
+        } else {
+          const caret = Math.max(start, selectionStart + changedLines[0].length - lines[0].length);
+          editor.setSelectionRange(caret, caret);
+        }
+        updateDocumentText(id);
+      }
+
+      btnIndent.addEventListener('click', () => changeIndent(false));
+      btnOutdent.addEventListener('click', () => changeIndent(true));
 
       btnZoomIn.addEventListener('click', () => {
         fontSize = Math.min(fontSize + 2, 36);
@@ -1084,34 +1090,34 @@
       /* 6. Shift/Ctrl Modifiers & Cursor Navigation */
       function resetShift() {
         shiftState = 0;
-        shiftAnchorRange = null;
+        shiftAnchor = null;
         btnShift.classList.remove('modifier-single', 'modifier-locked');
         btnShift.textContent = 'Shift';
       }
 
-      function rangeInEditor(range, editor) {
-        return range && editor.contains(range.startContainer) && editor.contains(range.endContainer);
+      function selectionFocus(editor) {
+        return editor.selectionDirection === 'backward' ? editor.selectionStart : editor.selectionEnd;
       }
 
-      function editorSelection(editor) {
-        const selection = window.getSelection();
-        return selection?.rangeCount && rangeInEditor(selection.getRangeAt(0), editor) ? selection : null;
+      function selectFrom(editor, anchor, focus) {
+        editor.setSelectionRange(Math.min(anchor, focus), Math.max(anchor, focus),
+          focus < anchor ? 'backward' : 'forward');
       }
 
       bottomBar.addEventListener('mousedown', event => {
-        if (event.target.closest('button') && editorSelection(getActiveEditor())) event.preventDefault();
+        if (event.target.closest('button') && document.activeElement === getActiveEditor()) event.preventDefault();
       });
 
       btnShift.addEventListener('click', () => {
-        shiftState = (shiftState + 1) % 3;
-        btnShift.classList.remove('modifier-single', 'modifier-locked');
-
-        if (shiftState === 1) {
+        if (shiftState === 0) {
+          shiftState = 1;
+          shiftAnchor = selectionFocus(getActiveEditor());
           btnShift.classList.add('modifier-single');
           btnShift.textContent = 'Shift (1)';
-          const sel = editorSelection(getActiveEditor());
-          shiftAnchorRange = sel?.getRangeAt(0).cloneRange() || null;
-        } else if (shiftState === 2) {
+        } else if (shiftState === 1) {
+          shiftState = 2;
+          shiftAnchor = null;
+          btnShift.classList.remove('modifier-single');
           btnShift.classList.add('modifier-locked');
           btnShift.textContent = 'Shift (2)';
         } else {
@@ -1124,48 +1130,129 @@
         btnCtrl.classList.toggle('active', isCtrlActive);
       });
 
-      // Shift single-tap range expansion on touch/click inside editor
-      [editor1, editor2].forEach(ed => {
-        ed.addEventListener('click', () => {
-          if (shiftState === 1 && ed === getActiveEditor()) {
-            const sel = editorSelection(ed);
-            if (sel && rangeInEditor(shiftAnchorRange, ed)) {
-              const currentRange = sel.getRangeAt(0);
-              const combinedRange = document.createRange();
-              try {
-                if (shiftAnchorRange.compareBoundaryPoints(Range.START_TO_START, currentRange) <= 0) {
-                  combinedRange.setStart(shiftAnchorRange.startContainer, shiftAnchorRange.startOffset);
-                  combinedRange.setEnd(currentRange.endContainer, currentRange.endOffset);
-                } else {
-                  combinedRange.setStart(currentRange.startContainer, currentRange.startOffset);
-                  combinedRange.setEnd(shiftAnchorRange.endContainer, shiftAnchorRange.endOffset);
-                }
-                sel.removeAllRanges();
-                sel.addRange(combinedRange);
-              } catch (e) {}
-            }
+      for (const editor of Object.values(editors)) {
+        editor.addEventListener('click', () => {
+          if (shiftState === 1 && editor === getActiveEditor()) {
+            selectFrom(editor, shiftAnchor, selectionFocus(editor));
             resetShift();
           }
         });
-      });
+      }
 
-      function moveCursor(direction, unit, ctrlUnit) {
-        const ed = getActiveEditor();
-        ed.focus();
-        const sel = editorSelection(ed);
-        if (typeof sel?.modify !== 'function') return;
-        const { anchorNode, anchorOffset, focusNode, focusOffset } = sel;
-        sel.modify(shiftState ? 'extend' : 'move', direction, isCtrlActive ? ctrlUnit : unit);
-        if (!editorSelection(ed)) sel.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+      const graphemes = typeof Intl.Segmenter === 'function'
+        ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+
+      function horizontalTarget(text, offset, direction) {
+        const forward = direction > 0;
+        if (forward ? offset >= text.length : offset <= 0) return offset;
+        if (isCtrlActive) {
+          const part = forward ? text.slice(offset) : text.slice(0, offset);
+          const word = forward
+            ? /^\s*(?:[\p{L}\p{N}\p{M}_]+|[^\s\p{L}\p{N}\p{M}_]+)?/u
+            : /(?:[\p{L}\p{N}\p{M}_]+|[^\s\p{L}\p{N}\p{M}_]+)?\s*$/u;
+          return offset + direction * part.match(word)[0].length;
+        }
+        const index = forward ? offset : offset - 1;
+        const cluster = graphemes?.segment(text).containing(index);
+        if (cluster) return forward ? cluster.index + cluster.segment.length : cluster.index;
+        if (forward) return offset + (text.codePointAt(offset) > 0xffff ? 2 : 1);
+        return offset - (offset > 1 && text.codePointAt(offset - 2) > 0xffff ? 2 : 1);
+      }
+
+      function firstOffset(start, end, matches) {
+        while (start < end) {
+          const middle = Math.floor((start + end) / 2);
+          if (matches(middle)) end = middle;
+          else start = middle + 1;
+        }
+        return start;
+      }
+
+      // Use the editor's width and text styles to find visual rows for touch navigation.
+      // The measurement element never supplies text to either document.
+      let measuredText;
+      function measureCaret(editor) {
+        if (measuredText !== editor.value) {
+          measuredText = editor.value;
+          caretMeasure.textContent = measuredText + '\u200b';
+        }
+        caretMeasure.style.width = editor.clientWidth + 'px';
+        caretMeasure.classList.toggle('no-wrap', !isTextWrapped);
+        const node = caretMeasure.firstChild;
+        const range = document.createRange();
+        const rowHeight = parseFloat(window.getComputedStyle(editor).lineHeight);
+        return offset => {
+          range.setStart(node, offset);
+          range.setEnd(node, offset + 1);
+          const { left, right, top, bottom } = range.getBoundingClientRect();
+          return { left, right, top, bottom, row: Math.floor((top + bottom) / (2 * rowHeight)) };
+        };
+      }
+
+      function rowTarget(editor, offset, action, caretAt) {
+        const { value } = editor;
+        const { left, row } = caretAt(offset);
+        const end = lineEnd(value, offset);
+        const first = firstOffset(lineStart(value, offset), offset, index => caretAt(index).row >= row);
+        const next = firstOffset(offset, end + 1, index => caretAt(index).row > row);
+        if (action === 'home') return first;
+        if (action === 'end') return Math.min(next, end);
+        if ((action === 'up' && first === 0) || (action === 'down' && next > value.length)) return offset;
+
+        // Only search the adjacent row.
+        const neighbor = action === 'up' ? first - 1 : next;
+        const targetRow = caretAt(neighbor).row;
+        const rowFirst = firstOffset(lineStart(value, neighbor), neighbor, index => caretAt(index).row >= targetRow);
+        const rowLast = firstOffset(neighbor, lineEnd(value, neighbor) + 1, index => caretAt(index).row > targetRow) - 1;
+        const right = firstOffset(rowFirst, rowLast, index => caretAt(index).left >= left);
+        if (right === rowFirst) return right;
+        const destination = Math.abs(caretAt(right - 1).left - left) < Math.abs(caretAt(right).left - left) ? right - 1 : right;
+        return graphemes?.segment(value).containing(destination)?.index ?? destination;
+      }
+
+      function revealCaret(editor, offset, caretAt) {
+        if (!editor.clientWidth || !editor.clientHeight) return;
+        const rect = caretAt(offset);
+        if (rect.top < editor.scrollTop) editor.scrollTop = rect.top;
+        else if (rect.bottom > editor.scrollTop + editor.clientHeight) editor.scrollTop = rect.bottom - editor.clientHeight;
+        if (rect.left < editor.scrollLeft) editor.scrollLeft = rect.left;
+        else if (rect.right > editor.scrollLeft + editor.clientWidth) editor.scrollLeft = rect.right - editor.clientWidth;
+      }
+
+      function moveCursor(action) {
+        const editor = getActiveEditor();
+        editor.focus({ preventScroll: true });
+        const { value, selectionStart, selectionEnd, selectionDirection } = editor;
+        const focus = selectionFocus(editor);
+        const caretAt = measureCaret(editor);
+        let target;
+        if (action === 'left' || action === 'right') {
+          if (!shiftState && selectionStart !== selectionEnd) target = action === 'left' ? selectionStart : selectionEnd;
+          else target = horizontalTarget(value, focus, action === 'right' ? 1 : -1);
+        } else if (isCtrlActive) {
+          if (action === 'home') target = 0;
+          else if (action === 'end') target = value.length;
+          else if (action === 'down') target = Math.min(value.length, lineEnd(value, focus) + 1);
+          else {
+            const start = lineStart(value, focus);
+            target = start === focus && start > 0 ? lineStart(value, start - 1) : start;
+          }
+        } else {
+          target = rowTarget(editor, focus, action, caretAt);
+        }
+
+        const anchor = selectionDirection === 'backward' ? selectionEnd : selectionStart;
+        selectFrom(editor, shiftState ? anchor : target, target);
+        revealCaret(editor, target, caretAt);
         if (shiftState === 1) resetShift();
       }
 
-      navLeft.addEventListener('click', () => moveCursor('backward', 'character', 'word'));
-      navRight.addEventListener('click', () => moveCursor('forward', 'character', 'word'));
-      navUp.addEventListener('click', () => moveCursor('backward', 'line', 'paragraph'));
-      navDown.addEventListener('click', () => moveCursor('forward', 'line', 'paragraph'));
-      navHome.addEventListener('click', () => moveCursor('backward', 'lineboundary', 'documentboundary'));
-      navEnd.addEventListener('click', () => moveCursor('forward', 'lineboundary', 'documentboundary'));
+      navLeft.addEventListener('click', () => moveCursor('left'));
+      navRight.addEventListener('click', () => moveCursor('right'));
+      navUp.addEventListener('click', () => moveCursor('up'));
+      navDown.addEventListener('click', () => moveCursor('down'));
+      navHome.addEventListener('click', () => moveCursor('home'));
+      navEnd.addEventListener('click', () => moveCursor('end'));
 
       window.addEventListener('DOMContentLoaded', initApp);
     })();
